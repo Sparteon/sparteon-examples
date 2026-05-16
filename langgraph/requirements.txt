@@ -1,0 +1,4 @@
+sparteon-sdk
+langgraph
+langchain-core
+httpx

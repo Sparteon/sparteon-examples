@@ -1,0 +1,3 @@
+sparteon-sdk
+anthropic
+httpx

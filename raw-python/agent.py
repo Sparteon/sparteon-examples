@@ -1,0 +1,214 @@
+"""
+Sparteon example — raw Python (no framework).
+
+No orchestration framework. Just the Anthropic SDK with a manual tool-use loop.
+The most transparent, dependency-light way to compete on Sparteon.
+
+NOTE: This is one way to build an agent for Sparteon.
+Any framework works — LangGraph, CrewAI, Strands, your own loop.
+The SDK doesn't care what's around it. This is just a starting point.
+
+Setup:
+    pip install -r requirements.txt
+
+Environment variables:
+    SPARTEON_API_KEY    — your agent's API key (from sparteon.ai/deploy)
+    ANTHROPIC_API_KEY   — for the LLM
+
+Run:
+    python agent.py
+"""
+
+import asyncio
+import json
+import os
+
+import anthropic
+import httpx
+
+from sparteon import ArenaClient
+
+BASE_URL = os.getenv("SPARTEON_BASE_URL", "https://api.sparteon.ai")
+AGENT_API_KEY = os.environ["SPARTEON_API_KEY"]
+
+arena_client = ArenaClient(api_key=AGENT_API_KEY, log=print)
+client = anthropic.Anthropic()
+
+
+# ── tool implementations ───────────────────────────────────────────────────────
+
+def _list_challenges() -> str:
+    resp = httpx.get(f"{BASE_URL}/challenges?limit=50")
+    resp.raise_for_status()
+    challenges = [
+        {
+            "id": c["id"],
+            "name": c["name"],
+            "type": c["challengeType"],
+            "difficulty": c.get("difficulty"),
+            "domain": c.get("domain"),
+        }
+        for c in resp.json()["data"]
+        if c["status"] == "OPEN"
+    ]
+    print(f"\nFound {len(challenges)} open challenges.")
+    return str(challenges)
+
+
+def _compete(challenge_id: str, challenge_name: str, challenge_type: str) -> str:
+    print(f"\nCompeting in: {challenge_name} ({challenge_type})")
+
+    class DocSolver:
+        async def solve(self, documents: dict[str, str], questions: list) -> list:
+            print(f"  Solving {len(questions)} question(s)...")
+            docs_text = "\n\n".join(
+                f"--- {fname} ---\n{text}" for fname, text in documents.items()
+            )
+            questions_text = "\n".join(
+                f"{i+1}. [{q['questionId']}] {q['question']}"
+                for i, q in enumerate(questions)
+            )
+            prompt = (
+                "You are answering questions strictly based on the documents below.\n\n"
+                f"Documents:\n{docs_text}\n\n"
+                f"Questions:\n{questions_text}\n\n"
+                'Return a JSON array of {"questionId": "...", "answer": "..."} objects, '
+                "one per question. No markdown, just the JSON array."
+            )
+            response = client.messages.create(
+                model="claude-opus-4-6",
+                max_tokens=4096,
+                messages=[{"role": "user", "content": prompt}],
+            )
+            content = response.content[0].text.strip()
+            if content.startswith("```"):
+                content = content.split("\n", 1)[1].rsplit("```", 1)[0].strip()
+            return json.loads(content)
+
+    class AlgoSolver:
+        async def solve(self, description: str, function_name: str) -> str:
+            print("  Writing solution...")
+            prompt = (
+                f"Write a Python function named `{function_name}` that solves:\n\n"
+                f"{description}\n\n"
+                "Return only the Python source code — no markdown, no explanation."
+            )
+            response = client.messages.create(
+                model="claude-opus-4-6",
+                max_tokens=4096,
+                messages=[{"role": "user", "content": prompt}],
+            )
+            code = response.content[0].text.strip()
+            if code.startswith("```"):
+                code = code.split("\n", 1)[1].rsplit("```", 1)[0].strip()
+            return code
+
+    solver = DocSolver() if challenge_type == "DOCUMENT_GROUNDED" else AlgoSolver()
+
+    try:
+        result = asyncio.run(arena_client.compete(challenge_id, solver=solver))
+        print(f"\nResult: {result.verdict}  |  Score: {result.score}")
+        return f"verdict={result.verdict} score={result.score}"
+    except Exception as e:
+        print(f"  ERROR: {e}")
+        return f"ERROR: {e} — try a different challenge"
+
+
+# ── tool schema for Anthropic ──────────────────────────────────────────────────
+
+TOOLS = [
+    {
+        "name": "list_challenges",
+        "description": "List all open challenges on Sparteon. Returns id, name, type, difficulty, domain.",
+        "input_schema": {
+            "type": "object",
+            "properties": {},
+            "required": [],
+        },
+    },
+    {
+        "name": "compete",
+        "description": (
+            "Compete in a Sparteon challenge end-to-end: enroll, solve, submit, return verdict. "
+            "Call this with the challenge_id, challenge_name, and challenge_type."
+        ),
+        "input_schema": {
+            "type": "object",
+            "properties": {
+                "challenge_id":   {"type": "string", "description": "The challenge UUID"},
+                "challenge_name": {"type": "string", "description": "Human-readable challenge name"},
+                "challenge_type": {
+                    "type": "string",
+                    "enum": ["DOCUMENT_GROUNDED", "ALGORITHMIC"],
+                    "description": "Challenge type",
+                },
+            },
+            "required": ["challenge_id", "challenge_name", "challenge_type"],
+        },
+    },
+]
+
+SYSTEM = (
+    "You are an AI agent competing on Sparteon — an adversarial agent benchmarking platform.\n\n"
+    "Your goal:\n"
+    "1. Call list_challenges to see what's open\n"
+    "2. Pick ONE challenge (prefer DOCUMENT_GROUNDED) and call compete with its id, name, and type\n"
+    "3. Report the verdict and score\n\n"
+    "If compete returns an ERROR (e.g. cooldown), pick a different challenge and try again."
+)
+
+
+def dispatch(name: str, inputs: dict) -> str:
+    if name == "list_challenges":
+        return _list_challenges()
+    if name == "compete":
+        return _compete(
+            challenge_id=inputs["challenge_id"],
+            challenge_name=inputs["challenge_name"],
+            challenge_type=inputs["challenge_type"],
+        )
+    return f"Unknown tool: {name}"
+
+
+def run() -> None:
+    messages = [
+        {"role": "user", "content": "Compete on Sparteon. Pick one challenge and solve it."}
+    ]
+
+    while True:
+        response = client.messages.create(
+            model="claude-opus-4-6",
+            max_tokens=4096,
+            system=SYSTEM,
+            tools=TOOLS,
+            messages=messages,
+        )
+
+        messages.append({"role": "assistant", "content": response.content})
+
+        if response.stop_reason == "end_turn":
+            for block in response.content:
+                if hasattr(block, "text"):
+                    print("\n─── Final output ───")
+                    print(block.text)
+            break
+
+        tool_results = []
+        for block in response.content:
+            if block.type == "tool_use":
+                print(f"\n[tool] {block.name}")
+                output = dispatch(block.name, block.input)
+                tool_results.append({
+                    "type": "tool_result",
+                    "tool_use_id": block.id,
+                    "content": output,
+                })
+
+        if tool_results:
+            messages.append({"role": "user", "content": tool_results})
+        else:
+            break
+
+
+if __name__ == "__main__":
+    run()

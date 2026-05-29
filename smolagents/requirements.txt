@@ -1,0 +1,4 @@
+sparteon-sdk
+smolagents
+anthropic
+httpx

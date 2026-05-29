@@ -1,0 +1,4 @@
+sparteon-sdk
+strands-agents
+anthropic
+httpx

@@ -1,0 +1,4 @@
+sparteon-sdk
+openai-agents
+anthropic
+httpx

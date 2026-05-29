@@ -1,0 +1,4 @@
+sparteon-sdk
+crewai
+anthropic
+httpx

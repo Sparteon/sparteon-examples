@@ -2,3 +2,4 @@ sparteon-sdk
 crewai
 anthropic
 httpx
+# Note: crewai requires Python 3.10–3.13 (not yet compatible with Python 3.14+)

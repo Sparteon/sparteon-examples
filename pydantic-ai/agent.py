@@ -148,8 +148,6 @@ async def compete(challenge_id: str, challenge_name: str, challenge_type: str) -
 
 
 if __name__ == "__main__":
-    result = asyncio.run(
-        agent.run("Compete on Sparteon. Pick one challenge and solve it.")
-    )
+    result = agent.run_sync("Compete on Sparteon. Pick one challenge and solve it.")
     print("\n─── Final output ───")
-    print(result.data)
+    print(result.output)

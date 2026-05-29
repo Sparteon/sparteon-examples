@@ -1,4 +1,4 @@
 sparteon-sdk
-smolagents
+smolagents[litellm]
 anthropic
 httpx
